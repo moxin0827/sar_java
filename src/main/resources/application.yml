@@ -1,0 +1,175 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /
+
+spring:
+  application:
+    name: java-parser-service
+
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 100MB
+      max-request-size: 100MB
+      file-size-threshold: 2KB
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      indent-output: true
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/sarpro?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: root
+    password: Javadazuoye552
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+        jdbc:
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+    open-in-view: false
+
+logging:
+  level:
+    root: INFO
+    com.example.javaparser: DEBUG
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: logs/java-parser.log
+
+# LLM配置
+llm:
+  enabled: true
+
+  # 提供商选择: OPENAI, ANTHROPIC, QWEN, CUSTOM
+  provider: OPENAI
+
+  # 全局配置（可选，会覆盖各提供商的默认配置）
+  api-key: ${LLM_API_KEY:}
+  api-url: ${LLM_API_URL:}
+  model: ${LLM_MODEL:}
+  temperature: 0.3
+  timeout: 1200000  # 超时120秒（大型项目FSK生成需要较长时间）
+
+  # OpenAI配置 (GPT-4o)
+  openai:
+    api-key: ${OPENAI_API_KEY:}
+    api-url: https://ssvip.dmxapi.com/v1/chat/completions
+    embedding-url: https://ssvip.dmxapi.com/v1/embeddings
+    model: gpt-5.4
+    embedding-model: text-embedding-3-large
+    organization: ${OPENAI_ORG:}
+    temperature: 0.3
+    max-tokens: 8000
+
+  # Anthropic配置 (Claude Sonnet 4.5)
+  anthropic:
+    api-key: ${ANTHROPIC_API_KEY:}
+    api-url: https://ssvip.dmxapi.com/v1/messages
+    model: claude-sonnet-4-5-20250929
+    version: "2023-06-01"
+    temperature: 0.3
+    max-tokens: 5000
+
+  # Qwen配置 (Qwen3-Max-Thinking)
+  qwen:
+    api-key: ${QWEN_API_KEY:}
+    api-url: https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+    model: qwen3-max-thinking
+    temperature: 0.3
+    max-tokens: 5000
+    enable-search: false
+
+# 组件图生成配置
+component:
+  clustering:
+    min-cluster-size: 3
+    max-cluster-size: 20
+    similarity-threshold: 0.6
+  module-detection:
+    use-package-structure: true
+    use-naming-convention: true
+    use-dependency-analysis: true
+    use-llm-semantic: true
+
+# 架构恢复配置
+recovery:
+  # 相似度权重
+  struct-weight: 0.45
+  semantic-weight: 0.55
+  threshold: 0.5
+
+  # AP聚类参数
+  max-iterations: 200
+  damping: 0.9
+
+  # 并行优化开关
+  enable-parallel-embedding: true    # 启用并行embedding生成
+  enable-parallel-similarity: true   # 启用并行相似度矩阵计算
+  enable-parallel-clustering: true   # 启用并行AP聚类
+
+  # Embedding并行配置（核心优化）
+  embedding-concurrent-batches: 8    # 并发批次数（根据API限流调整，推荐6-10）
+  embedding-delay-ms: 100            # 批次间延迟(ms)，避免触发限流（推荐100-200）
+
+  # FSK采样配置
+  fsk-max-samples: 100               # FSK采样上限（默认80，超大项目可提升到100-120）
+
+  # 并行阈值
+  parallel-threshold: 30             # 类数量超过此值启用并行（默认50，降至30更早启用）
+
+  # 聚类算法选择: AFFINITY_PROPAGATION, AGGLOMERATIVE, DBSCAN, SPECTRAL, KMEANS_SILHOUETTE
+  clustering-algorithm: AFFINITY_PROPAGATION
+
+  # DBSCAN参数
+  dbscan-eps:                          # 邻域半径（null=自适应k-distance估计，>0=固定值）
+  dbscan-min-pts: 2                    # 最小邻域点数
+
+  # Spectral参数
+  spectral-num-clusters: 0           # 聚类数（0=自动检测，使用eigengap启发式）
+
+  # KMeans参数
+  kmeans-k-min: 2                    # K搜索下限
+  kmeans-k-max: 0                    # K搜索上限（0=auto=sqrt(n)）
+  kmeans-max-iter: 100               # 单次KMeans最大迭代
+
+  # Agglomerative参数
+  agglomerative-linkage: WARD          # 链接准则: SINGLE, COMPLETE, AVERAGE, WARD
+
+  # 组件合并后处理
+  enable-merge-small-components: true  # 启用小组件合并（默认true）
+  min-component-size: 2                # 最小组件类数量，低于此值将被合并（默认2）
+  merge-sim-threshold: 0.1             # 合并最低相似度阈值（默认0.1）
+
+  # AP偏好百分位数（0.0=最小值产生最少聚类，0.5=中位数，默认0.1）
+  ap-preference-percentile: 0.1
+
+  # 目标组件数量（0=自动计算sqrt(N)，>0=固定目标）
+  target-component-count: 0
+
+# 图表渲染配置
+diagram:
+  # 图片尺寸限制（像素）
+  max-size: 65536                    # PlantUML最大图片尺寸（默认4096，推荐16384）
+
+  # DPI设置（影响PNG清晰度）
+  dpi: 300                           # 图片DPI（默认96，推荐300用于高清输出）
+
+  # 默认缩放因子
+  scale: 1.0                         # 默认缩放因子（1.0=原始大小，大型项目推荐1.5-2.0）
+
+  # 高质量PNG渲染（推荐启用）
+  use-batik: true                    # 使用Batik进行SVG->PNG高质量转换（默认true）
+  png-width: 8192                    # Batik PNG输出宽度（像素，默认4096，推荐8192）
+

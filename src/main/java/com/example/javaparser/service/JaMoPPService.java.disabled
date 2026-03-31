@@ -1,0 +1,730 @@
+package com.example.javaparser.service;
+
+import lombok.extern.slf4j.Slf4j;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.resource.ResourceSet;
+import org.eclipse.emf.ecore.resource.impl.ResourceSetImpl;
+import org.eclipse.uml2.uml.*;
+import org.eclipse.uml2.uml.Class;
+import org.eclipse.uml2.uml.Package;
+import org.eclipse.uml2.uml.resource.UMLResource;
+import org.emftext.language.java.classifiers.Classifier;
+import org.emftext.language.java.containers.CompilationUnit;
+import org.emftext.language.java.members.Field;
+import org.emftext.language.java.members.Method;
+import org.emftext.language.java.resource.java.mopp.JavaResourceFactory;
+import org.emftext.language.java.types.TypeReference;
+import org.springframework.stereotype.Service;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+/**
+ * JaMoPP服务 - 使用JaMoPP生成UML类图和包图
+ * JaMoPP提供更好的EMF集成和类型解析
+ */
+@Slf4j
+@Service
+public class JaMoPPService {
+
+    private ResourceSet resourceSet;
+    private Model model;
+    private Package rootPackage;
+    private Map<String, Package> packageMap;
+    private Map<String, org.eclipse.uml2.uml.Classifier> classifierMap;
+    private Map<Classifier, org.eclipse.uml2.uml.Classifier> jamoppToUmlMap;
+    private PrimitiveType stringType;
+    private PrimitiveType intType;
+    private PrimitiveType booleanType;
+    private PrimitiveType doubleType;
+    private PrimitiveType longType;
+    private PrimitiveType floatType;
+
+    /**
+     * 初始化JaMoPP和UML2资源集
+     */
+    public void initialize() {
+        log.info("初始化JaMoPP资源集...");
+
+        resourceSet = new ResourceSetImpl();
+
+        // 注册JaMoPP资源工厂
+        resourceSet.getResourceFactoryRegistry()
+                .getExtensionToFactoryMap()
+                .put("java", new JavaResourceFactory());
+
+        // 注册UML资源工厂
+        resourceSet.getResourceFactoryRegistry()
+                .getExtensionToFactoryMap()
+                .put(UMLResource.FILE_EXTENSION, UMLResource.Factory.INSTANCE);
+        resourceSet.getResourceFactoryRegistry()
+                .getExtensionToFactoryMap()
+                .put("xmi", UMLResource.Factory.INSTANCE);
+
+        // 注册UML包
+        resourceSet.getPackageRegistry()
+                .put(UMLPackage.eNS_URI, UMLPackage.eINSTANCE);
+
+        // 注册JaMoPP包
+        resourceSet.getPackageRegistry()
+                .put(org.emftext.language.java.JavaPackage.eNS_URI,
+                     org.emftext.language.java.JavaPackage.eINSTANCE);
+
+        packageMap = new HashMap<>();
+        classifierMap = new HashMap<>();
+        jamoppToUmlMap = new HashMap<>();
+
+        // 创建UML模型
+        model = UMLFactory.eINSTANCE.createModel();
+        model.setName("JavaCodeModel");
+
+        // 创建根包
+        rootPackage = model.createNestedPackage("root");
+
+        // 初始化基本类型
+        initializePrimitiveTypes();
+
+        log.info("JaMoPP资源集初始化完成");
+    }
+
+    /**
+     * 初始化基本数据类型
+     */
+    private void initializePrimitiveTypes() {
+        stringType = model.createOwnedPrimitiveType("String");
+        intType = model.createOwnedPrimitiveType("Integer");
+        booleanType = model.createOwnedPrimitiveType("Boolean");
+        doubleType = model.createOwnedPrimitiveType("Double");
+        longType = model.createOwnedPrimitiveType("Long");
+        floatType = model.createOwnedPrimitiveType("Float");
+    }
+
+    /**
+     * 使用JaMoPP解析Java项目并生成UML XMI文件
+     */
+    public XMIGenerationResult parseAndGenerateXMI(String sourceDirectory, String outputDirectory)
+            throws IOException {
+
+        if (resourceSet == null) {
+            initialize();
+        }
+
+        File sourceDir = new File(sourceDirectory);
+        if (!sourceDir.exists() || !sourceDir.isDirectory()) {
+            throw new IllegalArgumentException("无效的源码目录: " + sourceDirectory);
+        }
+
+        File outputDir = new File(outputDirectory);
+        if (!outputDir.exists()) {
+            outputDir.mkdirs();
+        }
+
+        log.info("开始使用JaMoPP解析Java项目: {}", sourceDirectory);
+
+        // 查找并解析所有Java文件
+        List<Path> javaFiles = findJavaFiles(sourceDir.toPath());
+        log.info("找到 {} 个Java文件", javaFiles.size());
+
+        // 使用JaMoPP解析所有Java文件
+        List<CompilationUnit> compilationUnits = new ArrayList<>();
+        for (Path javaFile : javaFiles) {
+            try {
+                CompilationUnit cu = parseJavaFileWithJaMoPP(javaFile);
+                if (cu != null) {
+                    compilationUnits.add(cu);
+                }
+            } catch (Exception e) {
+                log.error("JaMoPP解析文件失败: {}, 错误: {}", javaFile, e.getMessage());
+            }
+        }
+
+        log.info("JaMoPP成功解析 {} 个编译单元", compilationUnits.size());
+
+        // 第一遍：创建所有UML类和接口
+        for (CompilationUnit cu : compilationUnits) {
+            try {
+                createUMLClassifiersFromJaMoPP(cu);
+            } catch (Exception e) {
+                log.error("创建UML分类器失败: {}", e.getMessage(), e);
+            }
+        }
+
+        // 第二遍：处理继承关系和属性类型
+        for (CompilationUnit cu : compilationUnits) {
+            try {
+                processRelationshipsFromJaMoPP(cu);
+            } catch (Exception e) {
+                log.error("处理关系失败: {}", e.getMessage(), e);
+            }
+        }
+
+        // 第三遍：创建关联关系
+        log.info("开始创建关联关系...");
+        createAssociations();
+
+        log.info("成功解析 {} 个包, {} 个分类器", packageMap.size(), classifierMap.size());
+
+        // 生成XMI文件
+        String modelXMI = saveUMLModel(outputDir, "model.uml");
+        String packageXMI = savePackageView(outputDir, "package.uml");
+        String classXMI = saveClassView(outputDir, "class.uml");
+
+        XMIGenerationResult result = new XMIGenerationResult();
+        result.setModelXMIPath(modelXMI);
+        result.setPackageXMIPath(packageXMI);
+        result.setClassXMIPath(classXMI);
+        result.setTotalPackages(packageMap.size());
+        result.setTotalClasses(classifierMap.size());
+
+        return result;
+    }
+
+    /**
+     * 使用JaMoPP解析Java文件
+     */
+    private CompilationUnit parseJavaFileWithJaMoPP(Path javaFilePath) throws IOException {
+        log.debug("JaMoPP解析文件: {}", javaFilePath);
+
+        URI fileURI = URI.createFileURI(javaFilePath.toAbsolutePath().toString());
+        Resource resource = resourceSet.getResource(fileURI, true);
+
+        if (resource == null || resource.getContents().isEmpty()) {
+            log.warn("JaMoPP无法解析文件: {}", javaFilePath);
+            return null;
+        }
+
+        return (CompilationUnit) resource.getContents().get(0);
+    }
+
+    /**
+     * 从JaMoPP编译单元创建UML分类器
+     */
+    private void createUMLClassifiersFromJaMoPP(CompilationUnit cu) {
+        // 获取包名
+        String packageName = getPackageName(cu);
+        Package umlPackage = getOrCreatePackage(packageName);
+
+        // 处理所有分类器（类、接口、枚举）
+        for (Classifier jamoppClassifier : cu.getClassifiers()) {
+            try {
+                createUMLClassifier(jamoppClassifier, umlPackage, packageName);
+            } catch (Exception e) {
+                log.error("创建UML分类器失败: {}", jamoppClassifier.getName(), e);
+            }
+        }
+    }
+
+    /**
+     * 获取包名
+     */
+    private String getPackageName(CompilationUnit cu) {
+        if (cu.getNamespaces() != null && !cu.getNamespaces().isEmpty()) {
+            return String.join(".", cu.getNamespaces());
+        }
+        return "default";
+    }
+
+    /**
+     * 获取或创建UML Package
+     */
+    private Package getOrCreatePackage(String packageName) {
+        if (packageMap.containsKey(packageName)) {
+            return packageMap.get(packageName);
+        }
+
+        String[] parts = packageName.split("\\.");
+        Package currentPackage = rootPackage;
+
+        StringBuilder currentPath = new StringBuilder();
+        for (int i = 0; i < parts.length; i++) {
+            if (i > 0) {
+                currentPath.append(".");
+            }
+            currentPath.append(parts[i]);
+            String path = currentPath.toString();
+
+            if (!packageMap.containsKey(path)) {
+                Package newPackage = currentPackage.createNestedPackage(parts[i]);
+                packageMap.put(path, newPackage);
+                currentPackage = newPackage;
+                log.debug("创建包: {}", path);
+            } else {
+                currentPackage = packageMap.get(path);
+            }
+        }
+
+        return currentPackage;
+    }
+
+    /**
+     * 创建UML分类器
+     */
+    private void createUMLClassifier(Classifier jamoppClassifier, Package umlPackage, String packageName) {
+        String className = jamoppClassifier.getName();
+        String qualifiedName = packageName + "." + className;
+
+        if (classifierMap.containsKey(qualifiedName)) {
+            return; // 已存在
+        }
+
+        if (jamoppClassifier instanceof org.emftext.language.java.classifiers.Interface) {
+            // 创建接口
+            Interface umlInterface = umlPackage.createOwnedInterface(className);
+            classifierMap.put(qualifiedName, umlInterface);
+            jamoppToUmlMap.put(jamoppClassifier, umlInterface);
+
+            // 添加方法
+            for (Method method : ((org.emftext.language.java.classifiers.Interface) jamoppClassifier).getMethods()) {
+                createUMLOperation(umlInterface, method);
+            }
+
+            log.debug("创建接口: {}", qualifiedName);
+
+        } else if (jamoppClassifier instanceof org.emftext.language.java.classifiers.Class) {
+            // 创建类
+            org.emftext.language.java.classifiers.Class jamoppClass =
+                    (org.emftext.language.java.classifiers.Class) jamoppClassifier;
+
+            boolean isAbstract = jamoppClass.getAnnotationsAndModifiers().stream()
+                    .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Abstract);
+
+            Class umlClass = umlPackage.createOwnedClass(className, isAbstract);
+            classifierMap.put(qualifiedName, umlClass);
+            jamoppToUmlMap.put(jamoppClassifier, umlClass);
+
+            // 添加字段
+            for (Field field : jamoppClass.getFields()) {
+                createUMLProperty(umlClass, field);
+            }
+
+            // 添加方法
+            for (Method method : jamoppClass.getMethods()) {
+                createUMLOperation(umlClass, method);
+            }
+
+            log.debug("创建类: {}", qualifiedName);
+
+        } else if (jamoppClassifier instanceof org.emftext.language.java.classifiers.Enumeration) {
+            // 创建枚举
+            org.emftext.language.java.classifiers.Enumeration jamoppEnum =
+                    (org.emftext.language.java.classifiers.Enumeration) jamoppClassifier;
+
+            org.eclipse.uml2.uml.Enumeration umlEnum = umlPackage.createOwnedEnumeration(className);
+            classifierMap.put(qualifiedName, umlEnum);
+            jamoppToUmlMap.put(jamoppClassifier, umlEnum);
+
+            // 添加枚举常量
+            for (org.emftext.language.java.members.EnumConstant constant : jamoppEnum.getConstants()) {
+                EnumerationLiteral literal = UMLFactory.eINSTANCE.createEnumerationLiteral();
+                literal.setName(constant.getName());
+                umlEnum.getOwnedLiterals().add(literal);
+            }
+
+            log.debug("创建枚举: {}", qualifiedName);
+        }
+    }
+
+    /**
+     * 创建UML属性（字段）
+     */
+    private void createUMLProperty(Class umlClass, Field field) {
+        String propertyName = field.getName();
+        Property property = umlClass.createOwnedAttribute(propertyName, null);
+
+        // 设置类型（JaMoPP提供更准确的类型信息）
+        TypeReference typeRef = field.getTypeReference();
+        if (typeRef != null) {
+            Type propertyType = resolveType(typeRef);
+            property.setType(propertyType);
+        }
+
+        // 设置可见性
+        setVisibility(property, field.getAnnotationsAndModifiers());
+
+        // 设置静态和final修饰符
+        boolean isStatic = field.getAnnotationsAndModifiers().stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Static);
+        boolean isFinal = field.getAnnotationsAndModifiers().stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Final);
+
+        property.setIsStatic(isStatic);
+        property.setIsReadOnly(isFinal);
+    }
+
+    /**
+     * 创建UML操作（方法）
+     */
+    private void createUMLOperation(org.eclipse.uml2.uml.Classifier umlClassifier, Method method) {
+        String operationName = method.getName();
+        Operation operation;
+
+        if (umlClassifier instanceof Class) {
+            operation = ((Class) umlClassifier).createOwnedOperation(operationName, null, null);
+        } else if (umlClassifier instanceof Interface) {
+            operation = ((Interface) umlClassifier).createOwnedOperation(operationName, null, null);
+        } else {
+            return;
+        }
+
+        // 设置返回类型
+        TypeReference returnTypeRef = method.getTypeReference();
+        if (returnTypeRef != null) {
+            Type returnType = resolveType(returnTypeRef);
+            if (returnType != null) {
+                org.eclipse.uml2.uml.Parameter returnParam = UMLFactory.eINSTANCE.createParameter();
+                returnParam.setName("return");
+                returnParam.setType(returnType);
+                returnParam.setDirection(ParameterDirectionKind.RETURN_LITERAL);
+                operation.getOwnedParameters().add(returnParam);
+            }
+        }
+
+        // 添加参数
+        for (org.emftext.language.java.parameters.Parameter jamoppParam : method.getParameters()) {
+            String paramName = jamoppParam.getName();
+            Type paramType = resolveType(jamoppParam.getTypeReference());
+
+            org.eclipse.uml2.uml.Parameter umlParam = UMLFactory.eINSTANCE.createParameter();
+            umlParam.setName(paramName);
+            umlParam.setType(paramType);
+            umlParam.setDirection(ParameterDirectionKind.IN_LITERAL);
+            operation.getOwnedParameters().add(umlParam);
+        }
+
+        // 设置可见性
+        setVisibility(operation, method.getAnnotationsAndModifiers());
+
+        // 设置抽象和静态修饰符
+        boolean isAbstract = method.getAnnotationsAndModifiers().stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Abstract);
+        boolean isStatic = method.getAnnotationsAndModifiers().stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Static);
+
+        operation.setIsAbstract(isAbstract);
+        operation.setIsStatic(isStatic);
+    }
+
+    /**
+     * 解析类型引用
+     */
+    private Type resolveType(TypeReference typeRef) {
+        if (typeRef == null) {
+            return null;
+        }
+
+        String typeName = getTypeName(typeRef);
+
+        // 基本类型
+        switch (typeName) {
+            case "int":
+            case "Integer":
+                return intType;
+            case "long":
+            case "Long":
+                return longType;
+            case "double":
+            case "Double":
+                return doubleType;
+            case "float":
+            case "Float":
+                return floatType;
+            case "boolean":
+            case "Boolean":
+                return booleanType;
+            case "String":
+                return stringType;
+            case "void":
+            case "Void":
+                return null;
+        }
+
+        // 查找已定义的分类器
+        for (Map.Entry<String, org.eclipse.uml2.uml.Classifier> entry : classifierMap.entrySet()) {
+            if (entry.getKey().endsWith("." + typeName) || entry.getKey().equals(typeName)) {
+                return entry.getValue();
+            }
+        }
+
+        // 创建占位符类型
+        return createPlaceholderType(typeName);
+    }
+
+    /**
+     * 获取类型名称
+     */
+    private String getTypeName(TypeReference typeRef) {
+        if (typeRef.getTarget() != null) {
+            return typeRef.getTarget().getName();
+        }
+        return "Unknown";
+    }
+
+    /**
+     * 创建占位符类型
+     */
+    private PrimitiveType createPlaceholderType(String typeName) {
+        // 检查是否已存在
+        for (org.eclipse.uml2.uml.Type type : model.getOwnedTypes()) {
+            if (type instanceof PrimitiveType && type.getName().equals(typeName)) {
+                return (PrimitiveType) type;
+            }
+        }
+
+        PrimitiveType placeholder = model.createOwnedPrimitiveType(typeName);
+        log.debug("创建占位符类型: {}", typeName);
+        return placeholder;
+    }
+
+    /**
+     * 设置可见性
+     */
+    private void setVisibility(NamedElement element, List<?> modifiers) {
+        boolean isPublic = modifiers.stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Public);
+        boolean isPrivate = modifiers.stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Private);
+        boolean isProtected = modifiers.stream()
+                .anyMatch(m -> m instanceof org.emftext.language.java.modifiers.Protected);
+
+        if (isPublic) {
+            element.setVisibility(VisibilityKind.PUBLIC_LITERAL);
+        } else if (isPrivate) {
+            element.setVisibility(VisibilityKind.PRIVATE_LITERAL);
+        } else if (isProtected) {
+            element.setVisibility(VisibilityKind.PROTECTED_LITERAL);
+        } else {
+            element.setVisibility(VisibilityKind.PACKAGE_LITERAL);
+        }
+    }
+
+    /**
+     * 处理继承关系和关联
+     */
+    private void processRelationshipsFromJaMoPP(CompilationUnit cu) {
+        String packageName = getPackageName(cu);
+
+        for (Classifier jamoppClassifier : cu.getClassifiers()) {
+            String qualifiedName = packageName + "." + jamoppClassifier.getName();
+            org.eclipse.uml2.uml.Classifier umlClassifier = classifierMap.get(qualifiedName);
+
+            if (umlClassifier == null) {
+                continue;
+            }
+
+            // 处理继承关系
+            if (jamoppClassifier instanceof org.emftext.language.java.classifiers.Class) {
+                org.emftext.language.java.classifiers.Class jamoppClass =
+                        (org.emftext.language.java.classifiers.Class) jamoppClassifier;
+
+                // 处理extends
+                if (jamoppClass.getExtends() != null) {
+                    TypeReference superTypeRef = jamoppClass.getExtends();
+                    org.eclipse.uml2.uml.Classifier superClassifier = findClassifierByTypeRef(superTypeRef);
+
+                    if (superClassifier instanceof Class && umlClassifier instanceof Class) {
+                        ((Class) umlClassifier).createGeneralization((Class) superClassifier);
+                        log.debug("创建继承关系: {} -> {}", qualifiedName, superClassifier.getQualifiedName());
+                    }
+                }
+
+                // 处理implements
+                for (TypeReference interfaceRef : jamoppClass.getImplements()) {
+                    org.eclipse.uml2.uml.Classifier interfaceClassifier = findClassifierByTypeRef(interfaceRef);
+
+                    if (interfaceClassifier instanceof Interface && umlClassifier instanceof Class) {
+                        ((Class) umlClassifier).createInterfaceRealization(
+                                interfaceClassifier.getName() + "_realization",
+                                (Interface) interfaceClassifier
+                        );
+                        log.debug("创建接口实现: {} -> {}", qualifiedName, interfaceClassifier.getQualifiedName());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 根据类型引用查找分类器
+     */
+    private org.eclipse.uml2.uml.Classifier findClassifierByTypeRef(TypeReference typeRef) {
+        if (typeRef == null || typeRef.getTarget() == null) {
+            return null;
+        }
+
+        String typeName = typeRef.getTarget().getName();
+
+        // 查找分类器
+        for (Map.Entry<String, org.eclipse.uml2.uml.Classifier> entry : classifierMap.entrySet()) {
+            if (entry.getKey().endsWith("." + typeName) || entry.getKey().equals(typeName)) {
+                return entry.getValue();
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 创建关联关系
+     */
+    private void createAssociations() {
+        int associationCount = 0;
+
+        for (org.eclipse.uml2.uml.Classifier classifier : classifierMap.values()) {
+            if (!(classifier instanceof Class)) {
+                continue;
+            }
+
+            Class umlClass = (Class) classifier;
+
+            for (Property property : umlClass.getOwnedAttributes()) {
+                Type propertyType = property.getType();
+
+                if (propertyType instanceof org.eclipse.uml2.uml.Classifier && propertyType != umlClass) {
+                    org.eclipse.uml2.uml.Classifier targetClassifier = (org.eclipse.uml2.uml.Classifier) propertyType;
+
+                    if (!hasAssociation(umlClass, targetClassifier)) {
+                        createAssociation(umlClass, targetClassifier, property);
+                        associationCount++;
+                    }
+                }
+            }
+        }
+
+        log.info("创建了 {} 个关联关系", associationCount);
+    }
+
+    /**
+     * 检查是否已存在关联
+     */
+    private boolean hasAssociation(Class source, org.eclipse.uml2.uml.Classifier target) {
+        for (Association assoc : source.getAssociations()) {
+            for (Property end : assoc.getMemberEnds()) {
+                if (end.getType() == target) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 创建关联
+     */
+    private void createAssociation(Class source, org.eclipse.uml2.uml.Classifier target, Property sourceProperty) {
+        try {
+            Association association = (Association) model.createPackagedElement(
+                    source.getName() + "_" + target.getName() + "_Association",
+                    UMLPackage.Literals.ASSOCIATION
+            );
+
+            Property sourceEnd = association.createOwnedEnd(source.getName().toLowerCase(), source);
+            sourceEnd.setAggregation(AggregationKind.NONE_LITERAL);
+
+            Property targetEnd = association.createOwnedEnd(sourceProperty.getName(), target);
+            targetEnd.setAggregation(AggregationKind.NONE_LITERAL);
+
+            log.debug("创建关联: {} -> {}", source.getName(), target.getName());
+
+        } catch (Exception e) {
+            log.error("创建关联失败: {} -> {}", source.getName(), target.getName(), e);
+        }
+    }
+
+    /**
+     * 保存UML模型
+     */
+    private String saveUMLModel(File outputDir, String filename) throws IOException {
+        String filePath = new File(outputDir, filename).getAbsolutePath();
+
+        Resource resource = resourceSet.createResource(URI.createFileURI(filePath));
+        resource.getContents().add(model);
+
+        Map<String, Object> saveOptions = new HashMap<>();
+        saveOptions.put(UMLResource.OPTION_SAVE_ONLY_IF_CHANGED,
+                UMLResource.OPTION_SAVE_ONLY_IF_CHANGED_MEMORY_BUFFER);
+        saveOptions.put(org.eclipse.emf.ecore.xmi.XMLResource.OPTION_ENCODING, "UTF-8");
+
+        resource.save(saveOptions);
+
+        log.info("UML模型已保存到: {}", filePath);
+        return filePath;
+    }
+
+    /**
+     * 保存包视图
+     */
+    private String savePackageView(File outputDir, String filename) throws IOException {
+        String filePath = new File(outputDir, filename).getAbsolutePath();
+
+        Resource resource = resourceSet.createResource(URI.createFileURI(filePath));
+        resource.getContents().add(rootPackage);
+
+        Map<String, Object> saveOptions = new HashMap<>();
+        saveOptions.put(UMLResource.OPTION_SAVE_ONLY_IF_CHANGED,
+                UMLResource.OPTION_SAVE_ONLY_IF_CHANGED_MEMORY_BUFFER);
+
+        resource.save(saveOptions);
+
+        log.info("包视图已保存到: {}", filePath);
+        return filePath;
+    }
+
+    /**
+     * 保存类视图
+     */
+    private String saveClassView(File outputDir, String filename) throws IOException {
+        String filePath = new File(outputDir, filename).getAbsolutePath();
+
+        Resource resource = resourceSet.createResource(URI.createFileURI(filePath));
+        resource.getContents().addAll(classifierMap.values());
+
+        Map<String, Object> saveOptions = new HashMap<>();
+        saveOptions.put(UMLResource.OPTION_SAVE_ONLY_IF_CHANGED,
+                UMLResource.OPTION_SAVE_ONLY_IF_CHANGED_MEMORY_BUFFER);
+
+        resource.save(saveOptions);
+
+        log.info("类视图已保存到: ", filePath);
+        return filePath;
+    }
+
+    /**
+     * 递归查找所有Java文件
+     */
+    private List<Path> findJavaFiles(Path directory) throws IOException {
+        try (Stream<Path> paths = Files.walk(directory)) {
+            return paths
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().endsWith(".java"))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    /**
+     * XMI生成结果
+     */
+    public static class XMIGenerationResult {
+        private String modelXMIPath;
+        private String packageXMIPath;
+        private String classXMIPath;
+        private int totalPackages;
+        private int totalClasses;
+
+        public String getModelXMIPath() { return modelXMIPath; }
+        public void setModelXMIPath(String modelXMIPath) { this.modelXMIPath = modelXMIPath; }
+        public String getPackageXMIPath() { return packageXMIPath; }
+        public void setPackageXMIPath(String packageXMIPath) { this.packageXMIPath = packageXMIPath; }
+        public String getClassXMIPath() { return classXMIPath; }
+        public void setClassXMIPath(String classXMIPath) { this.classXMIPath = classXMIPath; }
+        public int getTotalPackages() { return totalPackages; }
+        public void setTotalPackages(int totalPackages) { this.totalPackages = totalPackages; }
+        public int getTotalClasses() { return totalClasses; }
+        public void setTotalClasses(int totalClasses) { this.totalClasses = totalClasses; }
+    }
+}
